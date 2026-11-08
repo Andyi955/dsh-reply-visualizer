@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dsh-reply-visualizer — demo</title>
+<style>
+  :root { --ink:#0e1116; --panel:#171b22; --line:#262c36; --dim:#8b95a5; --fg:#e7ecf3; --ok:#3ddc97; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1200px; height: 760px; overflow: hidden; background: #0a0c10; }
+  #stage { position: relative; width: 1200px; height: 760px; transform-origin: 75% 30%; }
+
+  .app { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr; background: #0e1116; }
+  .chat { position: absolute; inset: 0; overflow: hidden; }
+  .chat-head { height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 18px;
+    border-bottom: 1px solid var(--line); color: var(--dim); font: 12px/1 ui-sans-serif, system-ui; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #2f3946; }
+  .msg { position: absolute; left: 96px; top: 96px; width: 560px; }
+  .msg p { margin: 0 0 10px; font: 14.5px/1.62 ui-sans-serif, system-ui; color: #cfd7e3; }
+  .msg h3 { margin: 0 0 10px; font: 600 15px/1.4 ui-sans-serif, system-ui; color: #eef3f9; }
+  .actions { display: flex; align-items: center; gap: 6px; margin-top: 14px; }
+  .chip { height: 26px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line);
+    display: flex; align-items: center; color: var(--dim); font: 11px/1 ui-sans-serif, system-ui; }
+  .icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+    color: #9aa6b8; transition: none; }
+  .icon svg { width: 15px; height: 15px; }
+
+  .panel { position: absolute; top: 0; right: 0; bottom: 0; width: 440px; background: #f6f1e8;
+    box-shadow: -30px 0 60px rgba(0,0,0,.45); }
+  .panel-head { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+    background: var(--panel); color: var(--fg); font: 12px/1 ui-sans-serif, system-ui;
+    border-bottom: 1px solid var(--line); }
+  .panel-head b { font-weight: 600; }
+  .panel-head span { color: var(--dim); }
+  .panel img { display: block; width: 440px; height: 720px; object-fit: cover; object-position: top left; }
+
+  .toast { position: absolute; right: 18px; bottom: 18px; width: 320px; border-radius: 11px;
+    background: #1b212b; border: 1px solid #2b3340; box-shadow: 0 16px 40px rgba(0,0,0,.5);
+    padding: 10px 12px; color: var(--fg); font: 12px/1.5 ui-sans-serif, system-ui; }
+  .toast .row { display: flex; align-items: center; gap: 8px; }
+  .toast .led { width: 7px; height: 7px; border-radius: 50%; background: #f5b73d; }
+  .toast.ready .led { background: var(--ok); }
+  .toast .t { font-weight: 600; }
+  .toast .meta { margin-left: auto; color: var(--dim); font-size: 10.5px; }
+  .toast .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .toast .bar { height: 3px; border-radius: 2px; background: #2b3340; margin-top: 7px; overflow: hidden; }
+  .toast .fill { height: 100%; background: linear-gradient(90deg, #6ea8fe, #b18cff); }
+
+  #cursor { position: absolute; width: 22px; height: 22px; transform-origin: 4px 4px; filter: drop-shadow(0 2px 4px rgba(0,0,0,.6)); }
+  #ripple { position: absolute; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%;
+    border: 2px solid #8fb6ff; opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="app">
+    <div class="chat">
+      <div class="chat-head"><span class="dot"></span> Conversation · visual explainer</div>
+      <div class="msg">
+        <h3>How a URL shortener works under load</h3>
+        <p>Writes are rare and cheap; reads dominate the budget. The mapping is immutable, a code is
+           written once and never updated — so the read path can be a pure lookup with no invalidation
+           protocol and no cache coherence problem.</p>
+        <p>Read:write runs about 100:1 to 1000:1. Optimise the redirect to the exclusion of everything
+           else, and make that path physically short: the same edge node, one shard, one row.</p>
+        <div class="actions">
+          <span class="chip">Copy</span>
+          <span class="chip">Branch</span>
+          <span class="icon" id="icon"></span>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="panel">
+      <div class="panel-head"><b>Visual explainer</b><span>· the page</span></div>
+      <img src="page-still.png" alt="">
+    </div>
+  </div>
+  <div class="toast" id="toast">
+    <div class="row"><span class="led"></span><span class="t" id="toastTitle">Visual explanation ready</span><span class="meta" id="toastMeta">100%</span></div>
+    <div class="sub" id="toastSub">Click to open it</div>
+    <div class="bar"><div class="fill" id="toastFill" style="width:0%"></div></div>
+  </div>
+  <span id="ripple"></span>
+  <svg id="cursor" viewBox="0 0 24 24" fill="#fff"><path d="M4 2 L4 20 L9 15.5 L12.2 22 L15 20.6 L11.8 14.2 L18 13.8 Z"/></svg>
+</div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const T = Number(params.get('t') ?? 0);
+
+  document.getElementById('icon').innerHTML =
+    '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<rect x="1.9" y="3.1" width="8.4" height="6" rx="1.6" stroke="currentColor" stroke-width="1.3" opacity=".55"/>' +
+    '<rect x="4.3" y="8.1" width="8.4" height="6" rx="1.6" stroke="currentColor" stroke-width="1.3"/>' +
+    '<path d="M13 2.3 L13.62 3.68 L15 4.3 L13.62 4.92 L13 6.3 L12.38 4.92 L11 4.3 L12.38 3.68 Z" fill="currentColor"/></svg>';
+
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const ease = (x) => x * x * (3 - 2 * x);
+  const span = (t, a, b) => clamp((t - a) / (b - a), 0, 1);
+
+  // Icon sits at the end of the action row.
+  const iconX = document.getElementById('icon').getBoundingClientRect();
+  const ICON = { x: iconX.left + iconX.width / 2, y: iconX.top + iconX.height / 2 };
+
+  const CUR0 = { x: 1040, y: 690 };
+  const CUR1 = { x: ICON.x - 4, y: ICON.y + 2 };
+  const TOAST = { x: 1140, y: 690 };
+
+  function placeCursor(x, y, scale = 1) {
+    const el = document.getElementById('cursor');
+    el.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  }
+
+  // 0.0→0.9 travel to the icon · 1.1 click · 1.15 toast starts
+  const toIcon = ease(span(T, 0.15, 0.95));
+  // 2.9→3.5 travel to the toast · 3.5 click
+  const toToast = ease(span(T, 2.95, 3.5));
+  // after 3.5 the panel takes over
+  const cx = CUR0.x + (CUR1.x - CUR0.x) * toIcon + (TOAST.x - CUR1.x) * toToast;
+  const cy = CUR0.y + (CUR1.y - CUR0.y) * toIcon + (TOAST.y - CUR1.y) * toToast;
+  placeCursor(cx, cy, 1 + 0.15 * (1 - Math.abs(0.5 - span(T, 0.1, 1.0)) * 2));
+
+  // Clicks: ripple at the icon and at the toast.
+  const iconClick = span(T, 1.02, 1.35);
+  const toastClick = span(T, 3.48, 3.8);
+  const ripple = iconClick > 0 && iconClick < 1 ? iconClick : 0;
+  const rip = document.getElementById('ripple');
+  if (ripple > 0) {
+    rip.style.left = ICON.x + 'px';
+    rip.style.top = ICON.y + 'px';
+    rip.style.transform = `scale(${0.4 + ripple * 1.6})`;
+    rip.style.opacity = String(0.9 * (1 - ripple));
+  } else {
+    rip.style.opacity = '0';
+  }
+
+  // Toast: appears after the click, fills, then reports ready.
+  const show = T > 1.1 && T < 3.62;
+  const progress = clamp(span(T, 1.15, 2.85) * 100, 0, 99);
+  const ready = T >= 2.85 && T < 3.62;
+  const toast = document.getElementById('toast');
+  toast.style.opacity = show || ready ? '1' : '0';
+  toast.style.transform = `translateY(${(1 - span(T, 1.1, 1.4)) * 12}px)`;
+  toast.classList.toggle('ready', T >= 2.85);
+  document.getElementById('toastTitle').textContent = ready ? 'Visual explanation ready' : 'Reading the reply…';
+  document.getElementById('toastSub').textContent = ready ? 'Click to open it' : (progress < 40 ? 'the model is deciding what to draw' : 'writing the page');
+  document.getElementById('toastMeta').textContent = ready ? '' : Math.round(progress) + '%';
+  document.getElementById('toastFill').style.width = (ready ? 100 : progress) + '%';
+
+  // Panel slides in after the toast click, then the camera pushes in.
+  const slide = ease(span(T, 3.6, 4.15));
+  const panel = document.getElementById('panel');
+  panel.style.transform = `translateX(${(1 - slide) * 460}px)`;
+  panel.style.visibility = slide > 0 ? 'visible' : 'hidden';
+
+  const zoom = 1 + 0.18 * ease(span(T, 4.05, 5.0));
+  document.getElementById('stage').style.transform = `scale(${zoom})`;
+</script>
+</body>
+</html>

@@ -13,15 +13,15 @@
     "diagram"
   ],
   "license": "MIT",
-  "author": "YOUR NAME <you@example.com>",
+  "author": "Andyi955 <Andyi955@users.noreply.github.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer.git"
+    "url": "git+https://github.com/Andyi955/dsh-reply-visualizer.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer/issues"
+    "url": "https://github.com/Andyi955/dsh-reply-visualizer/issues"
   },
-  "homepage": "https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer#readme",
+  "homepage": "https://github.com/Andyi955/dsh-reply-visualizer#readme",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

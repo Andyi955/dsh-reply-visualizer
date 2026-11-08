@@ -10,6 +10,8 @@ load becomes a chart you can poke at.
 
 ![demo](docs/demo.gif)
 
+*Staged recording — the panel reveals a page this plugin actually generated. Video version: [docs/demo.mp4](docs/demo.mp4).*
+
 ## What it does
 
 Press the small cards icon under any long reply:
@@ -31,7 +33,7 @@ conversation with four explanations keeps its four pages together.
 ## Install
 
 ```bash
-git clone https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer.git
+git clone https://github.com/Andyi955/dsh-reply-visualizer.git
 ```
 
 Then, from a Harness session, install the checkout as a bundle:
