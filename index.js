@@ -1,5 +1,5 @@
 import { mkdir, readFile, appendFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import os from 'node:os';
 
 /** Stable Loader identity. */
@@ -7,6 +7,20 @@ export const name = 'reply-visualizer';
 
 const DEFAULTS = {
   pageDir: join(os.homedir(), '.dsh-reply-visualizer', 'pages'),
+  /** Route this call at a specific model instead of borrowing the session's. */
+  provider: '',
+  model: '',
+  /**
+   * Reasoning effort for this call. Empty means "pick from `quality`": the
+   * cheapest for fast, a low-but-nonzero effort for considered.
+   */
+  reasoningEffort: '',
+  /**
+   * 'considered' deliberates before writing — better choice of visual form.
+   * 'fast' skips it: measured 23 s per page instead of 184 s, at the cost of
+   * pages that reach for the obvious representation.
+   */
+  quality: 'considered',
   /** Abort only when nothing has arrived for this long — a stall, not a deadline. */
   stallTimeoutMs: 90_000,
   composeMaxInputChars: 14_000,
@@ -70,6 +84,8 @@ const HTML_PROMPT = [
   '- Animation loops must pause when the document is hidden.',
   '',
   'Output the document only: start with <!doctype html>. No commentary before or after it.',
+  '',
+  '- A page of styled boxes is a failure. Include at least one diagram drawn specifically for this reply (inline SVG or canvas — not a stock shape), and at least one animation whose timing is tied to the content rather than decorating it.',
 ].join('\n');
 
 /* ------------------------------------------------------------------ *
@@ -149,6 +165,45 @@ ${String(text ?? '').split(/\n{2,}/).slice(0, 6).map((para) => `<p>${esc(para)}<
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config };
 
+  /* --- settings the gallery can change without a restart --- */
+  const settingsFile = join(dirname(cfg.pageDir), 'settings.json');
+  const SETTING_VALUES = {
+    quality: ['fast', 'considered'],
+    reasoningEffort: ['', 'none', 'off', 'minimal', 'low', 'medium', 'high'],
+  };
+
+  async function readSettings() {
+    try {
+      const parsed = JSON.parse(await readFile(settingsFile, 'utf8'));
+      const out = {};
+      for (const [key, allowed] of Object.entries(SETTING_VALUES)) {
+        if (typeof parsed?.[key] === 'string' && allowed.includes(parsed[key])) out[key] = parsed[key];
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
+  async function writeSettings(patch) {
+    const next = { ...(await readSettings()) };
+    for (const [key, allowed] of Object.entries(SETTING_VALUES)) {
+      const value = patch?.[key];
+      if (typeof value === 'string' && allowed.includes(value)) next[key] = value;
+    }
+    await mkdir(dirname(settingsFile), { recursive: true });
+    await writeFile(settingsFile, JSON.stringify(next, null, 2), 'utf8');
+    return next;
+  }
+
+  function describeSettings(saved) {
+    return {
+      quality: saved.quality ?? cfg.quality,
+      reasoningEffort: saved.reasoningEffort ?? cfg.reasoningEffort,
+      options: SETTING_VALUES,
+    };
+  }
+
   /* --- the exact provider/model the agent last used --- */
   let lastRoute = null;
   ctx.on('agent/request', async (_payload, next) => {
@@ -160,6 +215,12 @@ export function apply(ctx, config = {}) {
   });
 
   function resolveRoute() {
+    // An explicit route wins: the page is a side quest, and it does not have to
+    // run on the same model as the conversation.
+    if (typeof cfg.provider === 'string' && cfg.provider !== ''
+      && typeof cfg.model === 'string' && cfg.model !== '') {
+      return { provider: cfg.provider, model: cfg.model };
+    }
     if (lastRoute !== null) return lastRoute;
     const service = ctx.get('agentDefaultModel');
     const selection = service !== undefined && typeof service.currentSelection === 'function'
@@ -184,11 +245,13 @@ export function apply(ctx, config = {}) {
    * No output cap and no wall-clock deadline: a page of HTML legitimately takes
    * minutes. What is bounded is a *stall* — silence for stallTimeoutMs.
    */
-  async function ask(system, text) {
+  async function ask(system, text, overrides = {}) {
     const llm = ctx.get('llm');
     if (!llm || typeof llm.prepareCall !== 'function') throw new Error('no model service in this profile');
     const route = resolveRoute();
     if (route === null) throw new Error('no model route yet: send one message first');
+    const quality = overrides.quality ?? cfg.quality;
+    const reasoningEffort = overrides.reasoningEffort ?? cfg.reasoningEffort;
     const input = String(text ?? '').slice(0, cfg.composeMaxInputChars);
     if (input.trim() === '') throw new Error('nothing to explain');
 
@@ -202,11 +265,25 @@ export function apply(ctx, config = {}) {
       }
     }, 2000);
 
+    // Wall-clock evidence: a 30 KB page at 200 tok/s should take seconds, so
+    // when it does not, the split between queueing, reasoning and output says why.
+    const startedAt = Date.now();
+    const stats = { prepareMs: 0, firstTokenMs: 0, textChars: 0, reasoningChars: 0, chunks: 0, totalMs: 0 };
+
     try {
-      const call = await llm.prepareCall(
-        { provider: route.provider, model: route.model, temperature: 0.5 },
-        controller.signal,
-      );
+      const controls = { provider: route.provider, model: route.model, temperature: 0.5 };
+      let call;
+      try {
+        call = await llm.prepareCall(controls, controller.signal, (current, model) => {
+          const chosen = reasoningEffort !== '' ? reasoningEffort : pickEffort(model, quality);
+          return chosen === undefined ? current : { ...current, reasoningEffort: chosen };
+        });
+      } catch {
+        // An effort this model does not admit must never kill the job.
+        call = await llm.prepareCall(controls, controller.signal);
+      }
+      stats.effort = call.config?.reasoningEffort ?? 'default';
+      stats.prepareMs = Date.now() - startedAt;
 
       let out = '';
       let failure = null;
@@ -218,16 +295,23 @@ export function apply(ctx, config = {}) {
         signal: controller.signal,
       })) {
         lastChunkAt = Date.now();
-        if (chunk.type === 'text-delta') out += chunk.text;
-        else if (chunk.type === 'finish') {
+        stats.chunks += 1;
+        if (chunk.type === 'text-delta') {
+          if (stats.firstTokenMs === 0) stats.firstTokenMs = Date.now() - startedAt;
+          stats.textChars += chunk.text.length;
+          out += chunk.text;
+        } else if (chunk.type === 'reasoning-delta') {
+          stats.reasoningChars += chunk.text.length;
+        } else if (chunk.type === 'finish') {
           if (chunk.reason.kind === 'max-tokens') truncated = true;
           if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') failure = chunk.reason.failure;
         }
       }
+      stats.totalMs = Date.now() - startedAt;
       if (stalled) throw new Error(`the model went quiet for ${Math.round(cfg.stallTimeoutMs / 1000)}s`);
       if (failure !== null) throw new Error(failure?.message ?? 'model request failed');
       if (truncated) throw new Error('the model stopped before it finished its answer');
-      return out;
+      return { text: out, stats };
     } finally {
       clearInterval(watchdog);
     }
@@ -272,6 +356,24 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * The effort this call should ask for: an explicit one if configured,
+   * otherwise the cheapest for 'fast' and a low-but-real one for 'considered'.
+   */
+  function pickEffort(model, quality) {
+    const list = model?.reasoning?.efforts;
+    if (!Array.isArray(list) || list.length === 0) return undefined;
+    const order = quality === 'fast'
+      ? ['none', 'off', 'minimal', 'low']
+      : ['low', 'minimal', 'medium', 'none', 'off'];
+    for (const want of order) {
+      const hit = list.find((effort) => String(effort?.id ?? '').toLowerCase() === want
+        || String(effort?.name ?? '').toLowerCase() === want);
+      if (hit !== undefined) return hit.id;
+    }
+    return undefined;
+  }
+
   ctx.inject(['webServer'], (scoped) => {
     const server = scoped.get('webServer');
     if (!server) return;
@@ -280,6 +382,18 @@ export function apply(ctx, config = {}) {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const route = url.pathname.replace(/^\/dsh-reply-visualizer/, '').replace(/\/+$/, '') || '/';
       try {
+        if (req.method === 'GET' && route === '/settings') {
+          json(res, 200, { ok: true, settings: describeSettings(await readSettings()) });
+          return;
+        }
+
+        if (req.method === 'POST' && route === '/settings') {
+          const saved = await writeSettings(await readJsonBody(req));
+          await record({ route: '/settings', ok: true, settings: saved });
+          json(res, 200, { ok: true, settings: describeSettings(saved) });
+          return;
+        }
+
         if (req.method === 'GET' && route === '/index') {
           json(res, 200, { ok: true, pages: await readIndex() });
           return;
@@ -294,7 +408,17 @@ export function apply(ctx, config = {}) {
         if (req.method === 'POST' && route === '/build') {
           const body = await readJsonBody(req);
           const text = String(body?.text ?? '');
-          const html = extractHtml(await ask(HTML_PROMPT, text));
+          const tools = String(body?.tools ?? '').slice(0, 200);
+          const saved = await readSettings();
+          const quality = saved.quality ?? cfg.quality;
+          const reasoningEffort = saved.reasoningEffort ?? cfg.reasoningEffort;
+          // No length budget: decode is fast (~250 tok/s), the cap was cutting
+          // exactly the diagrams and animations worth having.
+          const input = tools === ''
+            ? text
+            : `${text}\n\nDuring this reply the assistant used: ${tools}. Mention what was produced only where it helps the explanation.`;
+          const answer = await ask(HTML_PROMPT, input, { quality, reasoningEffort });
+          const html = extractHtml(answer.text);
           const id = String(body?.id ?? Date.now()).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
           const title = titleOf(html);
           const bytes = Buffer.byteLength(html);
@@ -308,8 +432,8 @@ export function apply(ctx, config = {}) {
             sessionId: String(body?.sessionId ?? '').slice(0, 64),
             sessionTitle: String(body?.sessionTitle ?? '').slice(0, 120),
           });
-          await record({ route: '/build', ok: true, id, bytes, title });
-          json(res, 200, { ok: true, url: `/dsh-reply-visualizer/page/${id}`, bytes });
+          await record({ route: '/build', ok: true, id, bytes, title, timing: answer.stats });
+          json(res, 200, { ok: true, url: `/dsh-reply-visualizer/page/${id}`, bytes, timing: answer.stats });
           return;
         }
 

@@ -36,6 +36,13 @@ window.__ModuleLoader__.load({
       'gallery.offline': 'Could not reach the plugin.',
       'gallery.ungrouped': 'Earlier, before chats were recorded',
       'gallery.pages': 'pages',
+      'settings.depth': 'Depth',
+      'settings.fast': 'Fast',
+      'settings.considered': 'Considered',
+      'settings.thinking': 'Thinking',
+      'settings.auto': 'Auto',
+      'settings.minimal': 'Minimal',
+      'settings.low': 'Low',
       'panel.prev': 'Previous',
       'panel.next': 'Next',
       'panel.empty': 'Nothing to explain yet',
@@ -84,6 +91,13 @@ window.__ModuleLoader__.load({
       'gallery.offline': '无法连接插件。',
       'gallery.ungrouped': '较早的页面（当时还没记录会话）',
       'gallery.pages': '个页面',
+      'settings.depth': '深度',
+      'settings.fast': '快速',
+      'settings.considered': '深思',
+      'settings.thinking': '思考',
+      'settings.auto': '自动',
+      'settings.minimal': '最少',
+      'settings.low': '低',
       'panel.prev': '上一张',
       'panel.next': '下一张',
       'panel.empty': '还没有可解释的内容',
@@ -216,9 +230,20 @@ window.__ModuleLoader__.load({
     }
 
     /** Does this reply deserve the icon at all? */
-    function worthExplaining(text) {
+    /**
+     * Does this reply deserve the icon?
+     *
+     * Length alone is the wrong test for agentic replies: one that edits three
+     * files and presents a spreadsheet can read as a single short paragraph.
+     * `tools` is a compact summary like "write×3, present×1".
+     */
+    function worthExplaining(text, tools = '') {
       const body = String(text ?? '').trim();
-      if (body.length < QUALIFY.chars) return false;
+      const toolCount = String(tools ?? '') === '' ? 0 : String(tools).split(',').length;
+      if (body.length < QUALIFY.chars) {
+        // Short prose is fine when real work happened behind it.
+        return toolCount >= 2 && body.length >= 180;
+      }
       const sections = (body.match(/^\s{0,3}#{1,6}\s+/gm) || []).length;
       const bullets = (body.match(/^\s*(?:[-*+]|\d{1,2}[.)])\s+/gm) || []).length;
       return body.length >= QUALIFY.strongChars || sections >= QUALIFY.sections || bullets >= QUALIFY.bullets;
@@ -273,12 +298,24 @@ window.__ModuleLoader__.load({
     function jobProgress(job, now) {
       const stage = STAGE_PLAN[job.step] ?? STAGE_PLAN.reading;
       const elapsed = Math.max(0, now - (job.stageStartedAt ?? now));
-      const eased = 1 - Math.exp(-elapsed / (stage.ms * 0.65));
-      const percent = Math.min(stage.to, stage.from + (stage.to - stage.from) * eased);
-      const index = Math.max(0, STAGE_ORDER.indexOf(job.step));
-      let remain = Math.max(0, stage.ms - elapsed);
-      for (const later of STAGE_ORDER.slice(index + 1)) remain += STAGE_PLAN[later].ms;
-      return { percent, etaSeconds: Math.max(1, Math.round(remain / 1000)) };
+      // Approach a ceiling never at the top: a running job must not claim 99%
+      // and then sit there for four minutes, which is what it used to do.
+      const ceiling = Math.min(stage.to, 97);
+      const percent = ceiling - (ceiling - stage.from) * Math.exp(-elapsed / (stage.ms * 0.9));
+      const overdue = elapsed > stage.ms;
+      return {
+        percent,
+        overdue,
+        etaSeconds: Math.max(0, Math.round((stage.ms - elapsed) / 1000)),
+        elapsedSeconds: Math.max(0, Math.round(elapsed / 1000)),
+      };
+    }
+
+    /** "~40s" while it is on schedule; the real elapsed time once it is not. */
+    function progressLabel(progress) {
+      if (!progress.overdue) return `~${Math.max(1, progress.etaSeconds)}s`;
+      const seconds = progress.elapsedSeconds;
+      return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
     }
 
     async function runJob(messageId, text, meta = {}) {
@@ -292,6 +329,7 @@ window.__ModuleLoader__.load({
           text: String(text ?? '').slice(0, 14000),
           sessionId: typeof meta.sessionId === 'string' ? meta.sessionId : '',
           sessionTitle: typeof meta.sessionTitle === 'string' ? meta.sessionTitle.slice(0, 120) : '',
+          tools: typeof meta.tools === 'string' ? meta.tools.slice(0, 200) : '',
         });
         setJob(messageId, { status: 'done', url: built.url, version: 0, finishedAt: Date.now() });
       } catch (error) {
@@ -351,6 +389,24 @@ window.__ModuleLoader__.load({
       return '';
     }
 
+    /** Compact "write×3, present×1" summary of the tools one reply used. */
+    function toolSummaryOf(snapshot, messageId) {
+      const nodes = snapshot?.nodes?.values?.();
+      if (!nodes) return '';
+      const list = Array.isArray(nodes) ? nodes : Array.from(nodes);
+      for (const node of list) {
+        if (node?.data?.finalNode?.messageId !== messageId) continue;
+        const counts = new Map();
+        for (const block of node.data.blocks ?? []) {
+          if (block.kind !== 'tool-call') continue;
+          const name = String(block.name ?? block.root?.name ?? 'tool');
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+        }
+        return [...counts.entries()].map(([name, count]) => `${name}\u00d7${count}`).join(', ');
+      }
+      return '';
+    }
+
     /* ------------------------------------------------------------------ *
      * Glyphs
      * ------------------------------------------------------------------ */
@@ -395,24 +451,10 @@ window.__ModuleLoader__.load({
 
       const jobs = [...JOBS.entries()].map(([id, job]) => ({ id, ...job }));
       const running = jobs.some((job) => job.status === 'running');
-      const finished = jobs.some((job) => job.status === 'done' || job.status === 'error');
 
-      // Finished toasts retire on their own; the × is there for the rest.
-      useEffect(() => {
-        if (!finished) return undefined;
-        const timer = setInterval(() => {
-          const stamp = Date.now();
-          for (const [key, job] of [...JOBS.entries()]) {
-            const ended = Number(job.finishedAt) || 0;
-            if ((job.status === 'done' || job.status === 'error') && ended > 0 && stamp - ended > 25_000) {
-              dismissJob(key);
-            }
-          }
-        }, 2000);
-        return () => {
-          clearInterval(timer);
-        };
-      }, [finished]);
+      // Finished toasts stay until you click them or dismiss them. A build can
+      // take minutes and nobody is watching the corner of the screen. An
+      // auto-retire here once threw away the only signal that a page was ready.
 
       // Tick only while something is running, so idle panes cost nothing.
       useEffect(() => {
@@ -465,7 +507,7 @@ window.__ModuleLoader__.load({
                 h('span', { key: 'title', className: 'rv-toast-title' }, title),
                 progress === null
                   ? null
-                  : h('span', { key: 'meta', className: 'rv-toast-meta' }, `${Math.round(progress.percent)}% · ~${progress.etaSeconds}s`),
+                  : h('span', { key: 'meta', className: 'rv-toast-meta' }, `${Math.round(progress.percent)}% · ${progressLabel(progress)}`),
               ]),
               sub === '' ? null : h('span', { key: 'sub', className: 'rv-toast-sub' }, clip(sub, 64)),
               progress === null
@@ -499,10 +541,14 @@ window.__ModuleLoader__.load({
       const text = readable
         ? useChat((snapshot) => readMessageText(snapshot, messageId))
         : '';
+      // A primitive selector: a reply can be short yet do a lot of work.
+      const tools = readable
+        ? useChat((snapshot) => toolSummaryOf(snapshot, messageId))
+        : '';
       const sessionTitle = typeof useSessions === 'function' && typeof sessionId === 'string'
         ? useSessions((state) => state?.byId?.[sessionId]?.title ?? '')
         : '';
-      if (typeof text !== 'string' || !worthExplaining(text)) return null;
+      if (typeof text !== 'string' || !worthExplaining(text, tools)) return null;
       const label = typeof t === 'function' ? t('action.open') : 'Explain this reply visually';
       return h('button', {
         type: 'button',
@@ -510,7 +556,7 @@ window.__ModuleLoader__.load({
         title: label,
         'aria-label': label,
         onClick: () => {
-          if (typeof open === 'function') open(messageId, text, { sessionId, sessionTitle });
+          if (typeof open === 'function') open(messageId, text, { sessionId, sessionTitle, tools });
         },
       }, h(CardsGlyph, null));
     }
@@ -549,6 +595,30 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = useState('loading');
       const [sessionId, setSessionId] = useState(null);
       const [openId, setOpenId] = useState(null);
+      const [settings, setSettings] = useState(null);
+
+      useEffect(() => {
+        let alive = true;
+        fetch('/dsh-reply-visualizer/settings')
+          .then((response) => response.json())
+          .then((data) => {
+            if (alive && data?.settings) setSettings(data.settings);
+          })
+          .catch(() => {});
+        return () => {
+          alive = false;
+        };
+      }, []);
+
+      /** Patch one setting; the host validates and persists it to disk. */
+      const saveSetting = (patch) => {
+        setSettings((current) => ({ ...(current ?? {}), ...patch }));
+        postJson('/dsh-reply-visualizer/settings', patch)
+          .then((data) => {
+            if (data?.settings) setSettings(data.settings);
+          })
+          .catch(() => {});
+      };
 
       useEffect(() => {
         let alive = true;
@@ -634,6 +704,29 @@ window.__ModuleLoader__.load({
       }
 
       // Every chat.
+      const segment = (label, key, choices, current) => h('div', { key, className: 'rv-seg-group' }, [
+        h('span', { key: 'label', className: 'rv-settings-label' }, label),
+        h('div', { key: 'seg', className: 'rv-seg' }, choices.map((choice) => h('button', {
+          key: choice.value,
+          type: 'button',
+          className: current === choice.value ? 'rv-seg-item rv-seg-on' : 'rv-seg-item',
+          'aria-pressed': current === choice.value,
+          onClick: () => saveSetting({ [key]: choice.value }),
+        }, choice.label))),
+      ]);
+
+      const settingsBar = settings === null ? null : h('div', { key: 'settings', className: 'rv-settings' }, [
+        segment(t('settings.depth'), 'quality', [
+          { value: 'fast', label: t('settings.fast') },
+          { value: 'considered', label: t('settings.considered') },
+        ], settings.quality),
+        segment(t('settings.thinking'), 'reasoningEffort', [
+          { value: '', label: t('settings.auto') },
+          { value: 'minimal', label: t('settings.minimal') },
+          { value: 'low', label: t('settings.low') },
+        ], settings.reasoningEffort),
+      ]);
+
       return h('div', { className: 'rv-gallery' }, [
         bar(null, t('gallery.title'), groups.length),
         status === 'error'
@@ -654,6 +747,7 @@ window.__ModuleLoader__.load({
             className: 'rv-gallery-card-date',
           }, `${group.pages.length} ${t('gallery.pages')} \u00b7 ${new Date(group.ts || Date.now()).toLocaleDateString()}`),
         ]))),
+        settingsBar,
       ]);
     }
 
@@ -788,6 +882,13 @@ window.__ModuleLoader__.load({
       '.rv-gallery-list{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:16px 20px 24px}',
       '.rv-gallery-session{flex-direction:column;gap:3px}',
       '.rv-viewer{display:flex;flex-direction:column;height:100%;min-height:0}',
+      '.rv-settings{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 20px 12px;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base)}',
+      '.rv-seg-group{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.rv-settings-label{font-size:10.5px;line-height:14px;letter-spacing:.1em;text-transform:uppercase;color:var(--dsw-alias-label-secondary)}',
+      '.rv-seg{display:inline-flex;padding:2px;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}',
+      '.rv-seg-item{border:none;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:11.5px;line-height:17px;padding:2px 9px;border-radius:6px;cursor:pointer;transition:background-color .14s,color .14s}',
+      '.rv-seg-item:hover{color:var(--dsw-alias-label-primary)}',
+      '.rv-seg-on{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgb(0 0 0 / .14)}',
       '.rv-viewer-frame{flex:1 1 auto;width:100%;border:0;background:#f6f1e8}',
       '.rv-page{position:relative;flex:1 1 auto;min-height:0;display:flex;background:#f6f1e8}',
       '.rv-frame{flex:1 1 auto;width:100%;height:100%;border:0;display:block;background:#f6f1e8}',

@@ -10,7 +10,7 @@ load becomes a chart you can poke at.
 
 ![demo](docs/demo.gif)
 
-*Staged recording — the panel reveals a page this plugin actually generated. Video version: [docs/demo.mp4](docs/demo.mp4).*
+*A real session: press the icon under a reply, wait about thirty seconds, and the page opens in the right sidebar. The full 51-second cut, with a second page: [docs/demo.mp4](docs/demo.mp4).*
 
 ## What it does
 

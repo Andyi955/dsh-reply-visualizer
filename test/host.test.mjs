@@ -90,6 +90,21 @@ const log = await readFile(join(pageDir, 'log.jsonl'), 'utf8');
 check('failures are recorded to disk', log.includes('"ok":false'), log.slice(0, 160));
 check('the log names the route', log.includes('/build'), log.slice(0, 200));
 
+// --- settings the gallery can change ---
+const settings0 = await call('GET', '/dsh-reply-visualizer/settings');
+check('settings have a default depth', JSON.parse(settings0.body).settings.quality === 'considered', settings0.body);
+check('settings offer the choices', Array.isArray(JSON.parse(settings0.body).settings.options.quality), settings0.body);
+
+const savedFast = await call('POST', '/dsh-reply-visualizer/settings', { quality: 'fast', reasoningEffort: 'none' });
+check('settings accept valid values', JSON.parse(savedFast.body).settings.quality === 'fast', savedFast.body);
+
+const reread = await call('GET', '/dsh-reply-visualizer/settings');
+check('settings persist across requests', JSON.parse(reread.body).settings.quality === 'fast'
+  && JSON.parse(reread.body).settings.reasoningEffort === 'none', reread.body);
+
+const rejected = await call('POST', '/dsh-reply-visualizer/settings', { quality: 'nonsense', reasoningEffort: 'ultra' });
+check('invalid settings are ignored', JSON.parse(rejected.body).settings.quality === 'fast', rejected.body);
+
 // --- HTML extraction ---
 const fenced = extractHtml('```html\n<!doctype html><html><body>hi</body></html>\n```');
 check('html survives a fence', fenced.startsWith('<!doctype html>'), fenced.slice(0, 40));
