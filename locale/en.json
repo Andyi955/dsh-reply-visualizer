@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reply Visualizer",
+    "description": "Adds a small icon to long assistant replies that opens an animated slide deck in the right Sidebar, drawing each idea as a diagram and, on request, illustrating a slide with the local ComfyUI workflow."
+  }
+}

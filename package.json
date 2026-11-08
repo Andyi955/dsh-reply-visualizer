@@ -1,0 +1,54 @@
+{
+  "name": "dsh-reply-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Turns a long assistant reply into a single self-contained HTML page that explains the idea visually — the model picks the diagram, the palette, and the interactions.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "visualisation",
+    "explainer",
+    "diagram"
+  ],
+  "license": "MIT",
+  "author": "YOUR NAME <you@example.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer/issues"
+  },
+  "homepage": "https://github.com/YOUR-GITHUB-USER/dsh-reply-visualizer#readme",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/host.test.mjs && node test/classnames.test.mjs && node test/client-smoke.mjs"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  }
+}
